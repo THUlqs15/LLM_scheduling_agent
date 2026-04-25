@@ -47,6 +47,7 @@ class EnergySchedConfig:
     w_tpot: float = 1.0
     eta_ms: float = 1e9
     Lmax: int = 0
+    max_batch_size: int = 0   # 0 / <=0 → inherit vLLM scheduler_config.max_num_seqs
     default_w_n: float = 1.0
     default_ttft_ms: float = 4000.0
     default_tpot_ms: float = 200.0
@@ -63,6 +64,7 @@ class EnergySchedConfig:
             w_tpot=float(os.environ.get("VLLM_ENERGY_W_TPOT", "1.0")),
             eta_ms=float(os.environ.get("VLLM_ENERGY_ETA_MS", "1e9")),
             Lmax=int(os.environ.get("VLLM_ENERGY_LMAX", "0")),
+            max_batch_size=int(os.environ.get("VLLM_ENERGY_MAX_BATCH_SIZE", "0")),
             freq_stride=int(os.environ.get("VLLM_ENERGY_FREQ_STRIDE", "1")),
             iter_log_path=os.environ.get("VLLM_ENERGY_ITER_LOG"),
         )
@@ -136,8 +138,10 @@ def _greedy_knapsack_2d_np(
     sub_tok: np.ndarray,
     Lmax: int,
     eta_ms: float,
+    B_max: int,
 ) -> List[int]:
-    """Same logic as greedy_knapsack_2d but on numpy arrays.
+    """Same logic as greedy_knapsack_2d but on numpy arrays, with an extra
+    request-count cap B_max (<=0 means no cap).
 
     Inputs are already pre-filtered to v > 0. Returns local indices into the
     sub_* arrays (caller is responsible for mapping back to global indices).
@@ -157,7 +161,10 @@ def _greedy_knapsack_2d_np(
     used_time = 0.0
     tok_sorted = sub_tok[order]
     t_sorted = sub_t[order]
+    cap = B_max if B_max > 0 else order.size  # <=0 ⇒ effectively unlimited
     for k in range(order.size):
+        if len(chosen) >= cap:
+            break  # batch-size cap hit — no point checking remaining items
         tk = int(tok_sorted[k])
         tt = float(t_sorted[k])
         if used_tokens + tk <= Lmax and used_time + tt <= eta_ms:
@@ -234,6 +241,9 @@ class FrequencyFirstSolver:
         min_slack = float(slack_ms.min())
         effective_eta = max(cfg.eta_ms, min_slack)
 
+        # Effective batch-size cap. cfg.max_batch_size <= 0 means "no cap".
+        B_max = cfg.max_batch_size if cfg.max_batch_size > 0 else 0
+
         best_J = 0.0
         best_f = default_f
         best_picked: List[int] = []
@@ -277,7 +287,7 @@ class FrequencyFirstSolver:
                 sub_tok = tok_arr[local_idx]
 
                 picked_in_sub = _greedy_knapsack_2d_np(
-                    sub_v, sub_t, sub_tok, Lmax, eta_left
+                    sub_v, sub_t, sub_tok, Lmax, eta_left, B_max
                 )
                 if not picked_in_sub:
                     continue
@@ -310,7 +320,7 @@ class FrequencyFirstSolver:
                 f"[dbg] iter={debug_iter} all={N}(p={n_p}d={n_d}) "
                 f"picked={len(best_picked)}(p={n_p_ch}d={n_d_ch}) "
                 f"f={best_f:.0f} eff_eta={min(effective_eta, cfg.eta_ms):.0f} "
-                f"min_sl={min_slack:.0f}",
+                f"min_sl={min_slack:.0f} B_max={B_max if B_max > 0 else 'inf'}",
                 file=sys.stderr, flush=True)
 
         return float(best_f), [reqs[i] for i in best_picked], best_et_pred
@@ -347,6 +357,10 @@ def make_energy_scheduler_class():
                 self._cfg.Lmax = int(getattr(
                     self.scheduler_config, "max_num_batched_tokens",
                     getattr(self.scheduler_config, "max_model_len", 8192),
+                ))
+            if self._cfg.max_batch_size <= 0:
+                self._cfg.max_batch_size = int(getattr(
+                    self.scheduler_config, "max_num_seqs", 128
                 ))
             self._iter_log = _open_iter_log(self._cfg.iter_log_path)
             self._prev_exit_t = None
