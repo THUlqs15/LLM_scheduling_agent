@@ -1,10 +1,9 @@
-# LARRYSmith: LLM-Guided Hyperparameter Optimization for LARRY v6 (Real vLLM)
+# LARRYSmith: LLM-Guided Hyperparameter Optimization for LARRY v6
 
 ## Instructions for Claude Code
 
-You are an LLM scheduling researcher. Your mission is to find the optimal hyperparameter configuration for the LARRY v6 scheduling algorithm by running iterative experiments **on a real vLLM server** (not a simulator).
+You are an LLM scheduling researcher. Your mission is to find the optimal hyperparameter configuration for the LARRY v6 scheduling algorithm by running iterative experiments on a vLLM server.
 
-Earlier work used the ROSS simulator and concluded that ROSS is insensitive to scheduling order at the tested concurrency (see `result.md`, the rounds-1-and-2 finding). This document moves the same optimization loop onto a live vLLM deployment, where the waiting queue is genuinely deep and scheduling decisions affect TTFT / TPOT / throughput.
 
 **Read this entire document carefully before doing anything.** Then follow the execution plan step by step.
 
