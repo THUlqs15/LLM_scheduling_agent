@@ -63,25 +63,27 @@ where:
 
 ### 1.2 Hyperparameters and Search Space
 
-| Parameter | Default | Range | Type | Description |
+Formula symbol names are used below; the corresponding `LarryConfig` field names (impl) follow in parentheses where they differ.
+
+| Parameter (impl name) | Default | Range | Type | Description |
 |-----------|---------|-------|------|-------------|
-| ALPHA_BASE | 10240 | [1000, 100000] | int | Aging weight base. alpha = ALPHA_BASE * max(1, q_len/16) |
-| MIN_QUEUE | 4 | [1, 16] | int | Skip reordering when queue ≤ this (use FCFS) |
+| ALPHA_BASE | 10240 | [1000, 200000] | int | Aging weight base. alpha = ALPHA_BASE × max(1, q_len/16) |
+| MIN_QUEUE | 4 | [4, 32] | int | Skip reordering when queue ≤ this; see §1.3 for load-adaptive semantics |
 | CACHE_WEIGHT | 2048 | [500, 20000] | int | Score bonus per cached prefix token |
 | CACHE_PROBE_INTERVAL | 4 | [1, 16] | int | Probe prefix cache every N scheduling rounds |
-| SESSION_PROGRESS_WEIGHT | 4096 | [0, 50000] | int | Bonus per completed session turn |
-| CONTINUITY_BONUS | 100000 | [10000, 1000000] | int | Peak continuity bonus (static fallback) |
-| CONTINUITY_DECAY | 60.0 | [10, 300] | float | Half-life seconds for continuity decay |
-| ADAPTIVE_BASE_BONUS | 50000 | [5000, 500000] | int | Reference bonus for adaptive continuity |
-| ADAPTIVE_REFERENCE_LEN | 30000 | [5000, 100000] | int | Reference prompt length for scaling |
-| ADAPTIVE_MIN_BONUS | 10000 | [0, 100000] | int | Lower clamp for adaptive bonus |
-| ADAPTIVE_MAX_BONUS | 200000 | [50000, 2000000] | int | Upper clamp for adaptive bonus |
-| PRESSURE_AMPLIFIER | 4.0 | [0.5, 20.0] | float | Decode pressure multiplier |
+| PROGRESS_WEIGHT (SESSION_PROGRESS_WEIGHT) | 4096 | [0, 50000] | int | Bonus per completed session turn |
+| CONTINUITY_BONUS | 100000 | [10000, 1000000] | int | Peak continuity bonus (static fallback when avg_prompt_len = 0) |
+| DECAY (CONTINUITY_DECAY) | 60.0 | [10, 300] | float | Half-life seconds for continuity decay |
+| BASE_BONUS (ADAPTIVE_BASE_BONUS) | 50000 | [5000, 500000] | int | Reference bonus for adaptive continuity |
+| REFERENCE_LEN (ADAPTIVE_REFERENCE_LEN) | 30000 | [5000, 100000] | int | Reference prompt length for scaling |
+| MIN_BONUS (ADAPTIVE_MIN_BONUS) | 10000 | [0, 100000] | int | Lower clamp for adaptive bonus |
+| MAX_BONUS (ADAPTIVE_MAX_BONUS) | 200000 | [50000, 2000000] | int | Upper clamp for adaptive bonus |
+| AMPLIFIER (PRESSURE_AMPLIFIER) | 4.0 | [0.5, 10.0] | float | Decode pressure multiplier |
 | DECODE_PRESSURE_THRESHOLD | 3 | [1, 10] | int | Running requests for full pressure |
-| SHORT_PREFILL_BOOST | 0 | [0, 500000] | int | Flat bonus for short-prefill requests |
-| SHORT_PREFILL_THRESHOLD | 8192 | [1024, 32768] | int | Token threshold for "short prefill" |
+| SHORT_BOOST (SHORT_PREFILL_BOOST) | 0 | [0, 500000] | int | Flat bonus for short-prefill requests |
+| SHORT_THRESHOLD (SHORT_PREFILL_THRESHOLD) | 8192 | [512, 32768] | int | Token threshold for "short prefill" |
 
-**Constraints**: ADAPTIVE_MIN_BONUS < ADAPTIVE_BASE_BONUS ≤ ADAPTIVE_MAX_BONUS, CONTINUITY_DECAY > 0, all integer params ≥ 0.
+**Constraints**: MIN_BONUS < BASE_BONUS ≤ MAX_BONUS, DECAY > 0, all integer params ≥ 0.
 
 ### 1.3 Design Principles
 
@@ -89,6 +91,7 @@ where:
 - The formula balances aging fairness, work cost, cache affinity, session progress, continuity for hot cache, and decode-pressure awareness.
 - Under decode pressure, large uncached prefills are penalized → favoring short / cached requests.
 - When `effective_remaining = 0` (fully cached), the pressure penalty vanishes → cache-warm requests are immune to pressure.
+- **MIN_QUEUE provides load-adaptive behavior.** When the waiting queue is shallow (≤ MIN_QUEUE), LARRY skips reordering entirely and falls back to FCFS. This means a single MIN_QUEUE value can behave very differently across load regimes: at high load (burst arrival, deep queue) LARRY is always active; at medium load (steady-state, shallow queue) LARRY stays dormant and preserves FCFS fairness. The effective value of MIN_QUEUE must be calibrated against the typical peak queue depth at each target load level — it is not a simple "minimum size" knob but the primary mechanism controlling when SRPT scheduling is safe to apply.
 
 ---
 
@@ -498,7 +501,7 @@ The same server stays up for the entire experiment session. `${LARRY_CFG}` (`act
 Inputs:
   --config-id   e.g. r3_c2 or fcfs_baseline
   --config-json path-to-candidate-config-json (or "fcfs" → write {} and disable hook for this run only)
-  --rates       comma-sep, e.g. "inf,4,2,1"
+  --rates       comma-sep, e.g. "inf,4,2"
   --num-prompts 512
   --dataset     ${DATASET}
   --model       Butter_L3_8B_RPMaster_v2
@@ -587,7 +590,7 @@ bash ${AGENT_DIR}/agent/start_server.sh   # with VLLM_USE_LARRY temporarily unse
 # wait for /v1/models
 conda run -n myvllm --no-banner python ${AGENT_DIR}/agent/run_one.py \
     --config-id fcfs_baseline --config-json fcfs \
-    --rates inf,4,2,1 --num-prompts 512
+    --rates inf,4,2 --num-prompts 512
 bash ${AGENT_DIR}/agent/stop_server.sh
 ```
 
@@ -612,7 +615,7 @@ Restart the server with `VLLM_USE_LARRY=1`. Write the default config to `${AGENT
 ```bash
 conda run -n myvllm --no-banner python ${AGENT_DIR}/agent/run_one.py \
     --config-id default --config-json ${AGENT_DIR}/larry_configs/config_default.json \
-    --rates inf,4,2,1 --num-prompts 512
+    --rates inf,4,2 --num-prompts 512
 ```
 
 After this run, **grep the server log** for `[LARRY] reload v1` AND `[LARRY] enabled.` — both must be present. If neither shows up the hook didn't activate; debug before proceeding.
@@ -636,15 +639,23 @@ After this run, **grep the server log** for `[LARRY] reload v1` AND `[LARRY] ena
 
 #### Search strategy
 
-**Round 1–3 (exploration).** Try extremes for ALPHA_BASE, PRESSURE_AMPLIFIER, CACHE_WEIGHT, SHORT_PREFILL_BOOST, DECODE_PRESSURE_THRESHOLD, MIN_QUEUE. Goal: identify which knobs actually move the metrics in real serving.
+**Parameter priority order (most to least impactful in practice):**
 
-**Round 4–7 (narrowing).** Focus on the 3–5 most influential parameters identified above. Smaller perturbations around the best. Start fixing less-important parameters at their best-found values.
+1. **MIN_QUEUE** — the dominant knob. Must exceed the typical peak waiting-queue depth at medium load to suppress SRPT tail starvation. Its effective range depends on `max_num_seqs` and arrival rate; values in [16, 32] are usually needed. This should be the first axis explored.
+2. **ALPHA_BASE** — controls aging aggressiveness. Too low → long requests starve; too high → aging dominates and SRPT loses effect. Typically [50k, 150k] is the productive range.
+3. **AMPLIFIER** — decode-pressure sensitivity. Moderate values (0.5–2.0) tend to work; extremes hurt one rate or another.
+4. **CACHE_WEIGHT, SHORT_BOOST / SHORT_THRESHOLD** — secondary. SHORT_BOOST is a no-op if SHORT_THRESHOLD covers most requests (e.g. 8192 tokens for ShareGPT). CACHE_WEIGHT helps only when prefix-cache hit rate is significant.
+5. **Continuity / session bonus group** (PROGRESS_WEIGHT, BASE_BONUS, REFERENCE_LEN, MIN_BONUS, MAX_BONUS, DECAY, CONTINUITY_BONUS) — near-zero impact for single-turn workloads. Zero these out early and focus budget elsewhere.
 
-**Round 8–10+ (fine-tuning).** Tiny adjustments to the top 2–3 parameters. Run the best config 2–3× to estimate variance. Re-run the FCFS baseline at the end of the session to make sure the box hasn't drifted thermally / queueing-wise; if it has, recompute composite scores.
+**Round 1–2 (exploration).** Establish that ALPHA_BASE is large enough to avoid starvation (≥ 50k). Sweep MIN_QUEUE across [4, 8, 16, 20, 25] to locate the load-adaptive threshold. Try a few AMPLIFIER values. Zero out continuity/session bonus terms from the start.
+
+**Round 3–5 (narrowing).** Grid search MIN_QUEUE × ALPHA_BASE around the best found pair. Fix AMPLIFIER. Only revisit CACHE_WEIGHT or SHORT_BOOST if rate=inf results plateau.
+
+**Round 6–8 (fine-tuning).** Tiny adjustments to MIN_QUEUE (±2–3) and ALPHA_BASE (±20%). Re-run the FCFS baseline at the end of the session to confirm the box hasn't drifted thermally; if it has, recompute composite scores.
 
 #### Per-rate scoring priorities
 
-Same weights as §3.5 above. Headline = mean over rates {inf, 4, 2, 1} req/s. Per-rate ranks are kept in result.md so we can spot regimes where LARRY helps inf-load throughput but hurts 1-req/s TTFT (or vice versa).
+Same weights as §3.5 above. Headline = mean over rates {inf, 4, 2} req/s. Per-rate ranks are kept in result.md so we can spot regimes where LARRY helps high-load throughput at one rate but hurts another.
 
 ### Step 5: Final verification & output
 
@@ -677,7 +688,6 @@ When you've converged:
 | inf  | ...          | ...          | ...         | ...          | ...         | ...              |
 | 4    | ...          | ...          | ...         | ...          | ...         | ...              |
 | 2    | ...          | ...          | ...         | ...          | ...         | ...              |
-| 1    | ...          | ...          | ...         | ...          | ...         | ...              |
 
 ## LARRY default
 | Rate | duration | mean_ttft | p99_ttft | mean_tpot | p99_tpot | throughput | score vs FCFS |
@@ -704,7 +714,7 @@ When you've converged:
 - Total experiments: N (M unique configs, K replicate runs)
 - Best config found in round: ...
 - Improvement over FCFS (median, mean over rates): X% / Y%
-- Per-rate improvements: inf=...%, 4=...%, 2=...%, 1=...%
+- Per-rate improvements: inf=...%, 4=...%, 2=...%
 
 ## Best Configuration
 {JSON}
@@ -726,7 +736,8 @@ When you've converged:
 
 - **Always confirm a candidate actually took effect.** After every `run_one.py` invocation, grep the server log for the new `[LARRY] reload v<n>` line whose timestamp falls inside the run window. If you don't see it, the bench ran on the previous config — the result is invalid.
 - **Always confirm `VLLM_USE_LARRY=0` reproduces stock vLLM** (§2.4). This is the contract that lets the user keep using vLLM normally outside this project.
-- **If a config destabilizes the server** (OOM, request stuck, NaNs in metrics): record it as `FAILED`, kill the server, restart, continue. Aggressive starvation (e.g. ALPHA_BASE=0 + MIN_QUEUE=1 + huge SHORT_PREFILL_BOOST) is plausible.
+- **SRPT tail starvation at medium load is the dominant failure mode.** Even with moderate parameters, if MIN_QUEUE is too small, LARRY activates at medium load (e.g. rate=4) and continuously re-prioritizes new short arrivals over long requests that have been waiting. This shows up as p99_TTFT regressing 100–300% versus FCFS while mean_TTFT looks fine. The fix is always MIN_QUEUE — not ALPHA_BASE or AMPLIFIER. Do not mistake this for "aggressive starvation" caused by extreme parameters; it happens with perfectly reasonable ALPHA_BASE values.
+- **If a config destabilizes the server** (OOM, request stuck, NaNs in metrics): record it as `FAILED`, kill the server, restart, continue. True aggressive starvation (e.g. ALPHA_BASE=0 + MIN_QUEUE=1 + huge SHORT_BOOST) is also possible.
 - **Real runs are noisy.** Don't chase 0.5% differences in the exploration phase. Save the variance-aware comparisons for the verification step.
 - **Don't mix server lifetimes between rates without saying so.** If you must restart the server mid-round (e.g. to apply a max_num_seqs change), call out which rows came from which lifetime in result.md.
 - **Record EVERYTHING** in result.md — failed experiments, surprising observations, harness bugs you found and fixed, and any deviations from this document. If you change this doc, note it in result.md with a diff summary.
