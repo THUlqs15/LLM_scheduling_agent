@@ -19,7 +19,7 @@ RESULTS_DIR       = ${AGENT_DIR}/larry_results
 LARRY_CFG_DIR     = ${AGENT_DIR}/larry_configs
 SERVER_LOG_DIR    = ${AGENT_DIR}/server_logs
 DATASET           = ~/.etc/ShareGPT_V3_unfiltered_cleaned_split.json
-MODEL             = Butter_L3_8B_RPMaster_v2     # same as the prior ROSS run
+MODEL             = Butter_L3_8B_RPMaster_v2     
 SERVER_HOST       = 127.0.0.1
 SERVER_PORT       = 8000
 SERVER_BASE       = http://${SERVER_HOST}:${SERVER_PORT}
@@ -58,7 +58,7 @@ where:
                               MIN_BONUS, MAX_BONUS)
 ```
 
-> **Real-vLLM note**: unlike ROSS, real vLLM **does** maintain a KV prefix cache, so `cached_tokens > 0` is achievable. Probe the cache for waiting requests (see §2.4) so the `CACHE_WEIGHT` term is actually exercised.
+
 
 ### 1.2 Hyperparameters and Search Space
 
