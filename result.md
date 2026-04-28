@@ -105,7 +105,7 @@
 
 **观察**：所有配置在 rate=4 下 p99_TTFT 均大幅超出 FCFS（最优 c8 也超出 136%）。猜测原因是中等负载下新短请求持续到达并抢占优先级 (MIN_QUEUE≤8 基本不触发，说明 rate=4 下等待队列长度通常超过 8)。SHORT_BOOST 因 SHORT_THRESHOLD 过大而无效。
 
-**Round 2 方向**：将 MIN_QUEUE 提高至 12–20，使 LARRY 仅在队列极深时激活；继续沿用低 ALPHA_BASE + 高 AMPLIFIER 组合。
+**Round 2 方向**：将 MIN_QUEUE 提高至 12–20，使 LARRY 仅在队列较长时激活；继续采用低 ALPHA_BASE + 高 AMPLIFIER 的组合。
 
 ---
 
