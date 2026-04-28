@@ -21,12 +21,31 @@ with a per-(τ, f) greedy, we:
     The batch B is fixed once a constraint binds; the resulting batch mode
     M (prefill_only / decode_only / mixed) is implied by who got admitted.
 
-    Step 3 (frequency search).  With B fixed, enumerate f ∈ F and pick
-        f* = argmax_f  Σ_{n∈B} r_n · exp(−[ET_i(B, f) − s_n]_+)
-                       − β · P(f) · ET_i(B, f)
-    where ET_i(B, f) is the predicted batch latency in SECONDS.  Note that
-    the cap CAP applies ONLY to the priority q_n; the objective in Step 3
-    uses the uncapped exp form per the original Alt-1 utility.
+    Step 3 (joint (prefix, frequency) enumeration).  Let
+        B_j ≜ {first j items of B̂ in greedy admission order},   j = 1..|B̂|.
+    Note that {B_j} is a NESTED chain: B_1 ⊂ B_2 ⊂ ... ⊂ B_{|B̂|} = B̂.
+    We jointly enumerate (B_j, f) ∈ {B_1,..,B_{|B̂|}} × F and pick
+        (j*, f*) = argmax_{j,f}  Σ_{n∈B_j} r_n · exp(−[ET_i(B_j, f) − s_n]_+)
+                                 − β · P(f) · ET_i(B_j, f)
+    where ET_i(B_j, f) is the predicted batch latency in SECONDS, and the
+    final batch is B_{j*}.  The cap CAP applies ONLY to the priority q_n
+    used by Step 2; the objective in Step 3 uses the uncapped exp form per
+    the original Alt-1 utility.
+
+    PLAN A — ALWAYS COMMIT.  We initialise best_J = -∞ and ALWAYS pick the
+    argmax (j*, f*) regardless of the sign of best_J.  Rationale: vLLM
+    will execute *something* this iteration anyway (continuous batching),
+    so picking the least-bad (B_j, f) strictly dominates falling back to
+    the default scheduler when J* is mildly negative (which happens in
+    pathological cases where every queued request is deeply overdue).
+
+    INCREMENTAL OPTIMISATION.  Since {B_j} is nested, computing ET_i(B_j,f)
+    for all j is essentially free once ET_i(B̂, f) is computed: a single
+    np.cumsum over the per-request workload contributions yields num_p[j]
+    and num_d[j] for every prefix.  The mode indicators I_p(B_j),I_d(B_j)
+    are likewise monotone (0→1, never reset), computed by cumsum(...)>0.
+    The full Step 3 vectorises to a single (|F|, |B̂|, |B̂|) matrix product
+    plus one argmax.
 
 UNIT CONVENTION
 ---------------
@@ -39,11 +58,14 @@ configs), there is exactly one /1000 conversion at ingest time and one
 
 WHY THIS HEURISTIC IS CHEAP
 ---------------------------
-    O(N log N) for the sort + O(N) greedy + O(|F| · 1) f-search
-        ≈ O(N log N + |F|)   per solve()
+    O(N log N) for the sort + O(N) greedy + O(|F| · |B̂|²) for the joint
+    (B_j, f) enumeration
+        ≈ O(N log N + |F| · |B̂|²)   per solve()
 
 vs. Alt-1's exact τ-enumeration which is O(|T| · |F| · N log N).  The
-factor of |T| = N (one breakpoint per request) is what saves us.
+factor of |T| = N (one breakpoint per request) is what saves us; the
+extra |B̂| factor (relative to a pure f-search) is the price of also
+optimising the prefix size, but is fully vectorised in NumPy.
 
 WHY THE PRIORITY q_n MAKES SENSE
 --------------------------------
@@ -132,10 +154,12 @@ def baseline_reward(r: ReqView, cfg: EnergySchedConfig) -> float:
 class Alt1HeuristicSolver:
     """Heuristic Alt-1 solver:
         Step 1  one-shot priority q_n = r_n · min(exp(−s_n), CAP) / ℓ_n
-        Step 2  density-greedy fill until L_max or B_max binds
-        Step 3  enumerate f ∈ F to maximize the Alt-1 utility on the fixed B
+        Step 2  density-greedy fill until L_max or B_max binds  (→ B̂)
+        Step 3  enumerate (B_j, f) ∈ {prefixes of B̂} × F jointly,
+                pick (j*, f*) = argmax of the Alt-1 utility; final batch B_{j*}
 
-    All time arithmetic in SECONDS; energy_model boundary is /1000.
+    All time arithmetic in SECONDS; energy_model boundary is /1000 (input)
+    and ×1000 (et_pred output for log compatibility).
     """
 
     # === HARDCODED HEURISTIC PARAMETER (so main.sh need not change) =========
@@ -250,69 +274,97 @@ class Alt1HeuristicSolver:
         if not picked_local:
             return float(default_f), [], 0.0
 
-        # ---- (4) Step 3: enumerate f, maximise the Alt-1 utility ---------
-        # ET_i(B, f) in SECONDS:
-        #    ET = (W_p + w_pf·I_p) / f  +  (W_d + w_dec·I_d) / f^α   + t_c     (in ms)
-        #    ET_s = ET / 1000
-        # u_n  = r_n · exp(−[ET_s − s_n_s]_+)
-        # J(f) = Σ u_n  −  β · P(f) · ET_s
-        I_p = 1.0 if has_pf else 0.0
-        I_d = 1.0 if has_dc else 0.0
-        num_p = W_p + lat.w_pf * I_p     # numerator (ms·MHz scale)
-        num_d = W_d + lat.w_dec * I_d    # numerator
+        # ---- (4) Step 3: joint (B_j, f) enumeration over prefixes -------
+        # Build cumulative workload sums over picked_local in admission
+        # order.  Because {B_j} is a nested chain (B_1 ⊂ B_2 ⊂ ... ⊂ B̂),
+        # ET_i(B_j, f) for all j is recovered "for free" via cumsum once
+        # we have the per-item contributions.  All time in SECONDS.
+        K = len(picked_local)                                       # |B̂|
+        picked_idx = np.asarray(picked_local, dtype=np.int64)       # (K,)
+        is_pf_picked = is_pf[picked_idx]                            # (K,)
+        # Per-item prefill/decode workload contributions (already 0 for
+        # the wrong mode by construction in wp_contrib / wd_contrib).
+        dp = wp_contrib[picked_idx].astype(np.float64)              # (K,)
+        dd = wd_contrib[picked_idx].astype(np.float64)              # (K,)
+        cum_dp = np.cumsum(dp)                                      # (K,)
+        cum_dd = np.cumsum(dd)                                      # (K,)
+        # Mode indicators are monotone non-decreasing along the prefix
+        # chain: once any prefill (resp. decode) is admitted, I_p=1
+        # (resp. I_d=1) for all longer prefixes.
+        cum_has_pf = (np.cumsum(is_pf_picked.astype(np.int64)) > 0).astype(np.float64)
+        cum_has_dc = (np.cumsum((~is_pf_picked).astype(np.int64)) > 0).astype(np.float64)
+        # Numerators of the ET formula, per prefix.  Units: ms·MHz scale,
+        # consistent with energy_model.batch_overhead_ms; the final /1000
+        # converts to seconds at the bottom.
+        num_p_vec = cum_dp + lat.w_pf * cum_has_pf                  # (K,)
+        num_d_vec = cum_dd + lat.w_dec * cum_has_dc                 # (K,)
 
+        # Frequency candidates (subsampled by stride).
         stride = cfg.freq_stride
         freqs = self.freq_candidates[::stride]
         if not freqs:
             freqs = self.freq_candidates
-        f_arr = np.asarray(freqs, dtype=np.float64)
-        f_alpha = f_arr ** lat.alpha
-        # ET in SECONDS for each candidate freq
-        ET_s_arr = (num_p / f_arr + num_d / f_alpha + lat.t_c) / 1000.0   # (|F|,)
+        f_arr = np.asarray(freqs, dtype=np.float64)                 # (|F|,)
+        f_alpha_arr = f_arr ** lat.alpha                            # (|F|,)
+        F = f_arr.size
 
-        # Per-request s_n_s and r_n on the picked subset (vectorised over f).
-        s_picked = s_n_s[picked_local]                     # (|B|,)
-        r_picked = r_n_vec[picked_local]                   # (|B|,)
-        # overshoot[fi, n] = [ET_s_arr[fi] − s_picked[n]]_+
-        overshoot = ET_s_arr[:, None] - s_picked[None, :]  # (|F|, |B|)
+        # ET_s_mat[fi, j-1] = ET_i(B_j, f_arr[fi]) in SECONDS
+        # = (num_p[j-1]/f + num_d[j-1]/f^α + t_c) / 1000
+        ET_s_mat = (
+            num_p_vec[None, :] / f_arr[:, None]                     # (|F|, K)
+            + num_d_vec[None, :] / f_alpha_arr[:, None]
+            + lat.t_c
+        ) / 1000.0                                                   # (|F|, K)
+
+        # Per-picked-request s_n and r_n in admission order.  All seconds.
+        s_picked = s_n_s[picked_idx]                                # (K,)
+        r_picked = r_n_vec[picked_idx]                              # (K,)
+
+        # u_mat[fi, j-1, n] = r_picked[n] · exp(−[ET_s_mat[fi, j-1] − s_picked[n]]_+)
+        # Memory: |F| × K² × 8 bytes; for |F|=21, K=128 ≈ 2.7 MB.
+        overshoot = (
+            ET_s_mat[:, :, None]                                    # (|F|, K, 1)
+            - s_picked[None, None, :]                               # (1, 1, K)
+        )                                                            # (|F|, K, K)
         np.maximum(overshoot, 0.0, out=overshoot)
-        u_mat = r_picked[None, :] * np.exp(-overshoot)     # (|F|, |B|)
-        sum_u_per_f = u_mat.sum(axis=1)                    # (|F|,)
+        u_mat = r_picked[None, None, :] * np.exp(-overshoot)        # (|F|, K, K)
 
-        # P(f) for each candidate; energy in JOULES = β · P · ET_s
+        # Lower-triangular mask: for prefix B_j, only items with index n
+        # in [0, j-1] (admission order) belong to B_j.  tri[j-1, n] = 1
+        # iff n ≤ j-1, i.e. n < j.
+        tri = np.tri(K, K, dtype=np.float64)                        # (K, K)
+        sum_u_per_jf = (u_mat * tri[None, :, :]).sum(axis=2)        # (|F|, K)
+
+        # Energy term in JOULES = β · P(f) · ET_s.
         P_arr = np.array(
             [self.power.power_watts(float(f)) for f in freqs], dtype=np.float64
-        )
-        J_per_f = sum_u_per_f - beta * P_arr * ET_s_arr     # (|F|,)
+        )                                                            # (|F|,)
+        J_mat = sum_u_per_jf - beta * P_arr[:, None] * ET_s_mat     # (|F|, K)
 
-        best_f_idx = int(np.argmax(J_per_f))
-        best_f = float(f_arr[best_f_idx])
-        best_J = float(J_per_f[best_f_idx])
-        best_et_s = float(ET_s_arr[best_f_idx])
-
-        # Empty-batch tie-break: if our best J is non-positive, reject the
-        # batch (the sched returns f=default and an empty batch — same
-        # convention as alt3/alt4).  This protects against pathological
-        # cases where every chosen request is so overdue that exp ≈ 0
-        # AND the energy term dominates.
-        if best_J <= 0.0:
-            return float(default_f), [], 0.0
+        # ---- Plan A: ALWAYS commit; argmax over (j, f), J* may be < 0 ---
+        flat_idx = int(np.argmax(J_mat))
+        best_fi, best_jidx = np.unravel_index(flat_idx, J_mat.shape)
+        best_j_size = int(best_jidx) + 1                            # |B_{j*}|
+        best_f = float(f_arr[best_fi])
+        best_J = float(J_mat[best_fi, best_jidx])
+        best_et_s = float(ET_s_mat[best_fi, best_jidx])
+        chosen_local = picked_local[:best_j_size]
 
         if debug_iter >= 0 and debug_iter % 10 == 0:
             import sys
             n_p = int(is_pf.sum())
             n_d = N - n_p
-            n_p_ch = sum(1 for i in picked_local if reqs[i].is_prefill)
-            n_d_ch = len(picked_local) - n_p_ch
+            n_p_ch = sum(1 for i in chosen_local if reqs[i].is_prefill)
+            n_d_ch = best_j_size - n_p_ch
             print(
                 f"[dbg-alg3_1] iter={debug_iter} all={N}(p={n_p}d={n_d}) "
-                f"picked={len(picked_local)}(p={n_p_ch}d={n_d_ch}) "
+                f"greedy=B̂[{K}] chosen=B_{best_j_size}(p={n_p_ch}d={n_d_ch}) "
                 f"f={best_f:.0f} J*={best_J:.3f} ET={best_et_s*1000.0:.2f}ms "
                 f"B_max={B_eff} CAP={self.EXP_CAP}",
                 file=sys.stderr, flush=True)
 
         # Convert ET back to ms for compatibility with the iter_log schema.
-        return float(best_f), [reqs[i] for i in picked_local], best_et_s * 1000.0
+        return float(best_f), [reqs[i] for i in chosen_local], best_et_s * 1000.0
 
 
 # Alias kept so external code that imports `FrequencyFirstSolver` still works
