@@ -1,4 +1,4 @@
-# LARRYSmith vLLM 调度优化实验结果
+# LARRY vLLM 调度优化实验结果
 
 ## 实验环境
 - 数据集：~/.etc/ShareGPT_V3_unfiltered_cleaned_split.json
@@ -7,14 +7,13 @@
 - 模型：Butter_L3_8B_RPMaster_v2（NVIDIA A40，46GB）
 - 服务器参数：TP=1, PP=1, max_num_seqs=32, max_num_batched_tokens=8192, prefix-caching=开启
 - 负载：512条 ShareGPT 请求；速率 {inf, 4, 2} req/s
-- 日期：2026-04-27
 
-## 代码改动审计
+## 代码改动
 - 修改的 vLLM 文件：vllm/v1/core/sched/scheduler.py（新增 import 及 `_larry_reorder_waiting` 方法）
 - 新增文件：vllm/v1/core/sched/larry_hook.py
 - 不设置 VLLM_USE_LARRY 时：已验证 `LarryRuntime.get().enabled == False`，vllm 正常导入，零额外开销
 
-## FCFS 基线（冻结参考值）
+## FCFS 基线（参考值）
 | 速率 | 耗时(s) | 均值TTFT(ms) | p99_TTFT(ms) | 均值TPOT(ms) | p99_TPOT(ms) | 吞吐(req/s) |
 |------|---------|-------------|-------------|-------------|-------------|------------|
 | inf  | 131.27  | 55037.63    | 114414.82   | 37.86       | 49.87       | 3.90       |
@@ -23,7 +22,7 @@
 
 **关键观察**：rate=inf 时均值TTFT=55s（队列极深）；rate≥2 时TTFT较低（<125ms）。LARRY 在高负载、队列深的场景下改进空间最大。
 
-## LARRY 默认配置（失败——所有速率均出现饥饿）
+## LARRY 默认配置（所有速率均出现饥饿）
 | 速率 | 耗时(s) | 均值TTFT(ms) | p99_TTFT(ms) | 均值TPOT(ms) | p99_TPOT(ms) | 吞吐(req/s) | 对比FCFS得分 |
 |------|---------|-------------|-------------|-------------|-------------|------------|------------|
 | inf  | 131.46  | 59128       | 115495      | 40.12       | 79.97       | 3.89       | -0.06      |
@@ -31,13 +30,13 @@
 | 2    | 276.76  | 37409       | 144586      | (待定)       | 252.0       | 1.85       | -2.97      |
 
 **根本原因**：ALPHA_BASE=10240 相对于 work_penalty 过小。q_len=10、eff_remaining=2000 时：penalty=100,000，alpha≈10,240 → 老化需 10s 才能克服惩罚，导致长请求持续被压后，队列越积越深，形成正反馈饥饿循环。
-**Round 1 修复方向**：ALPHA_BASE ≥ 50,000（所有 round-1 配置均使用 50k–100k）。
+**Round 1 方向**：ALPHA_BASE ≥ 50,000。
 
 ## 迭代记录
 
 ### Round 1 — 广泛探索（固定 ALPHA_BASE，变化 AMPLIFIER/CACHE_WEIGHT/SHORT_BOOST）
 
-所有配置均使用 ALPHA_BASE ≥ 50k 以保证稳定性。
+所有配置均使用 ALPHA_BASE ≥ 50k。
 
 配置参数：
 
@@ -94,24 +93,24 @@
 | **r1_c8** | 276.34  | **122**     | **215**     | 33.41       | 38.81       | 1.853      |
 | FCFS基线  | 275.86  | 124         | 228         | 33.53       | 41.73       | 1.860      |
 
-**各配置观察**：
+**各配置分析**：
 
-- **c1（基准）**：rate=inf 均值TTFT 改善 14.8%，但 rate=4 p99_TTFT 暴增至 11.8s（FCFS 4.4s）——SRPT 尾部饥饿首次出现。
-- **c2（AMPLIFIER 0.5↓）**：rate=inf 吞吐提升 7.1%（最佳），但 rate=4 p99 恶化至 14.9s。降低 AMPLIFIER 减弱了对解码压力的感知，使排序更激进，加剧饥饿。
-- **c3（CACHE_WEIGHT 10000↑）**：三个速率均无改善，高 CACHE_WEIGHT 引入噪音、破坏 SRPT 顺序，反而有害。
+- **c1（基准）**：rate=inf 均值TTFT 改善 14.8%，但 rate=4 p99_TTFT 暴增至 11.8s（FCFS 4.4s）——应该是饥饿的原因。
+- **c2（AMPLIFIER 0.5↓）**：rate=inf 吞吐提升 7.1%（最佳），但 rate=4 p99 恶化至 14.9s。降低 AMPLIFIER 减弱了对解码压力的感知，加剧饥饿。
+- **c3（CACHE_WEIGHT 10000↑）**：三个速率均无改善，高 CACHE_WEIGHT 可能会引入噪音，反而有害。
 - **c4（AMPLIFIER 4.0↑）**：rate=4 均值TTFT 降至 995ms（本轮最低），说明高 AMPLIFIER 能加速清空队列；但 p99 仍达 11.9s，长请求仍被持续饥饿。
 - **c5（SHORT_BOOST 100k，SHORT_THRESHOLD 8192）**：SHORT_THRESHOLD=8192 覆盖全部 ShareGPT 请求，SHORT_BOOST 对所有请求均生效，排序不变，结果与 c1 相近。
-- **c6（SHORT_BOOST 200k，SHORT_THRESHOLD 4096↓）**：较窄阈值形成两档差异，但结果与 c5 几乎相同，说明此数据集短请求本就占多数，SHORT_THRESHOLD 不是关键变量。
-- **c7（MIN_QUEUE 8↑）**：首次引入队列门控，rate=4 均值TTFT 降至 940ms。门控让 LARRY 在浅队列时回退至 FCFS，减轻但未消除尾部饥饿（p99 仍 12.7s，门控阈值仍太低）。
+- **c6（SHORT_BOOST 200k，SHORT_THRESHOLD 4096↓）**：阈值更窄，但结果与 c5 几乎相同，说明此数据集短请求本就占多数，SHORT_THRESHOLD 不是关键。
+- **c7（MIN_QUEUE 8↑）**：首次引入队列门控，rate=4 均值TTFT 降至 940ms。门控让 LARRY 在浅队列时回退至 FCFS，减轻但未消除饥饿（p99 仍 12.7s，门控阈值仍太低）。
 - **c8（ALPHA_BASE 50k↓，AMPLIFIER 2.0↑）**：本轮 rate=4 p99_TTFT 最低（10.3s）。较低 ALPHA_BASE 减缓老化速率，避免过于激进的 SRPT 排序；AMPLIFIER=2.0 增强解码压力感知。rate=inf 均值TTFT 改善 19.9%。
 
-**核心洞察**：所有配置在 rate=4 下 p99_TTFT 均大幅超出 FCFS（最优 c8 也超出 136%）。根因是中等负载下新短请求持续到达并抢占优先级，而 MIN_QUEUE≤8 无法阻止激活——说明 rate=4 下等待队列深度通常超过 8。SHORT_BOOST 因 SHORT_THRESHOLD 过大而无效。
+**观察**：所有配置在 rate=4 下 p99_TTFT 均大幅超出 FCFS（最优 c8 也超出 136%）。根因是中等负载下新短请求持续到达并抢占优先级，而 MIN_QUEUE≤8 基本不触发，说明 rate=4 下等待队列长度通常超过 8。SHORT_BOOST 因 SHORT_THRESHOLD 过大而无效。
 
 **Round 2 方向**：将 MIN_QUEUE 提高至 12–20，使 LARRY 仅在队列极深时激活；继续沿用低 ALPHA_BASE + 高 AMPLIFIER 组合。
 
 ---
 
-### Round 2 — 收窄（ALPHA_BASE范围、选择性加速、MIN_QUEUE门控）
+### Round 2 — 探索范围收窄（ALPHA_BASE、MIN_QUEUE）
 
 配置参数：
 
@@ -164,13 +163,13 @@
 | **r2_c7** | 273.84 | 124         | 216         | 33.41       | 40.06       | 1.870      |
 | FCFS基线 | 275.86  | 124         | 228         | 33.53       | 41.73       | 1.860      |
 
-**关键发现**：MIN_QUEUE=20 是突破口。rate=4 的 p99_TTFT 从 10.3s（r1_c8）降至 6.8s（r2_c7），说明 rate=4 下队列深度通常 ≤20，LARRY 很少激活，饥饿问题得到抑制。
+**观察**：MIN_QUEUE=20 时，rate=4 的 p99_TTFT 从 10.3s（r1_c8）降至 6.8s（r2_c7）。
 
-**Round 3 假设**：组合高 ALPHA_BASE（→ rate=inf 的 SRPT 收益更大）+ MIN_QUEUE ≥ 20（→ 保护 rate=4）。
+**Round 3 方向**：高 ALPHA_BASE（→ rate=inf 的 SRPT 收益更大）+ MIN_QUEUE ≥ 20（→ 保护 rate=4）。
 
 ---
 
-### Round 3 — 收敛（ALPHA_BASE × MIN_QUEUE 网格搜索）
+### Round 3 — 进一步收敛（ALPHA_BASE × MIN_QUEUE 网格搜索）
 
 配置参数：
 
@@ -219,69 +218,7 @@
 | r3_c6     | 276.07  | 124         | 219         | 33.21       | 38.87       | 1.855      |
 | FCFS基线  | 275.86  | 124         | 228         | 33.53       | 41.73       | 1.860      |
 
-**关键发现**：r3_c5 `{ALPHA_BASE=100000, MIN_QUEUE=25, AMPLIFIER=1.0}` 为当前最优配置（TOTAL=+3.34）。MIN_QUEUE=25 使 LARRY 在 rate=4 下几乎不激活（队列通常 ≤25），消除尾部饥饿；ALPHA_BASE=100k 在 rate=inf 保证强力 SRPT 效果。
+**发现**：r3_c5 `{ALPHA_BASE=100000, MIN_QUEUE=25, AMPLIFIER=1.0}` 为当前最优配置。MIN_QUEUE=25 使 LARRY 在 rate=4 下几乎不激活（队列通常 ≤25）；ALPHA_BASE=100k 在 rate=inf 保证强力 SRPT 效果。
 
-**Round 4 目标**：围绕 r3_c5 微调，测试 ALPHA_BASE 80k-150k、MIN_QUEUE 22-30、AMPLIFIER 0.5-1.5。
+**Round 4 方向**：围绕 r3_c5 微调，测试 ALPHA_BASE 80k-150k、MIN_QUEUE 22-30、AMPLIFIER 0.5-1.5。
 
-*注：TOTAL 得分为 {inf, 4, 2} 三个速率的平均值（rate=1 不常用，已排除）。*
-
----
-
-### Round 4 — 微调（ALPHA_BASE × MIN_QUEUE × AMPLIFIER 精细搜索）
-
-配置参数：
-
-| 配置      | ALPHA_BASE | MIN_Q | AMPLIFIER | 变化说明 |
-|-----------|------------|-------|-----------|---------|
-| r4_c1     | 100k       | 28    | 1.0       | MIN_Q 上调 |
-| r4_c2     | 100k       | 22    | 1.0       | MIN_Q 下调 |
-| r4_c3     | 120k       | 25    | 1.0       | ALPHA_BASE 上调 |
-| r4_c4     | 100k       | 25    | 0.5       | AMPLIFIER 下调 |
-| r4_c5     | 100k       | 25    | 1.5       | AMPLIFIER 上调 |
-| r4_c6     | 150k       | 25    | 1.0       | ALPHA_BASE 大幅上调 |
-
-实测指标（rate=inf）：
-
-| 配置      | 耗时(s) | 均值TTFT(ms) | p99_TTFT(ms) | 均值TPOT(ms) | p99_TPOT(ms) | 吞吐(req/s) |
-|-----------|---------|-------------|-------------|-------------|-------------|------------|
-| **r4_c1** | 122.81  | 43357       | 102818      | 35.11       | 45.66       | 4.169      |
-| FCFS基线  | 131.27  | 55037       | 114414      | 37.86       | 49.87       | 3.900      |
-| r3_c5参考 | 124.12  | 44339       | 104510      | 35.35       | 43.47       | 4.125      |
-
-实测指标（rate=4）：
-
-| 配置      | 耗时(s) | 均值TTFT(ms) | p99_TTFT(ms) | 均值TPOT(ms) | p99_TPOT(ms) | 吞吐(req/s) |
-|-----------|---------|-------------|-------------|-------------|-------------|------------|
-| **r4_c1** | 148.32  | 944         | **4848**    | 35.73       | 44.00       | 3.452      |
-| FCFS基线  | 148.19  | 1066        | 4370        | 36.33       | 46.14       | 3.450      |
-| r3_c5参考 | 149.31  | 872         | 5026        | 35.86       | 45.87       | 3.429      |
-
-实测指标（rate=2）：
-
-| 配置      | 耗时(s) | 均值TTFT(ms) | p99_TTFT(ms) | 均值TPOT(ms) | p99_TPOT(ms) | 吞吐(req/s) |
-|-----------|---------|-------------|-------------|-------------|-------------|------------|
-| **r4_c1** | 276.21  | 125         | 217         | 33.30       | 38.98       | 1.854      |
-| FCFS基线  | 275.86  | 124         | 228         | 33.53       | 41.73       | 1.860      |
-| r3_c5参考 | 269.91  | 123         | 215         | 33.22       | 38.70       | 1.897      |
-
-*注：r4_c1 在暂停前已完成测试。r4_c2–c6 尚未运行。*
-
-**初步观察**：r4_c1（MIN_QUEUE=28）的 rate=4 p99_TTFT=4848ms 低于 r3_c5 的 5026ms（约 +3.5% 改善），rate=inf 均值TTFT 也略有改善（43357 vs 44339ms）。MIN_QUEUE 进一步上调有积极效果。ALPHA_BASE 和 AMPLIFIER 维持 r3_c5 最优值不变。
-
----
-
-## 验证（Top-3 × 3次重复）
-（收敛后填写）
-
-## 收敛总结
-（所有轮次完成后填写）
-
-## 最优配置
-（收敛后填写）
-
-## 关键结论
-（分析后填写）
-
-## 清理状态
-- 服务器：运行中/已停止（每次会话更新）
-- 额外 pip 安装：无
