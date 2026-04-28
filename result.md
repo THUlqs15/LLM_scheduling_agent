@@ -47,7 +47,7 @@
 | r1_c4     | 100k       | 4     | 4.0       | 2048    | 0           | 8192            | AMPLIFIER 大幅提高 |
 | r1_c5     | 100k       | 4     | 1.0       | 2048    | 100k        | 8192            | 加 SHORT_BOOST |
 | r1_c6     | 100k       | 4     | 1.0       | 2048    | 200k        | 4096            | 高 SHORT_BOOST + 窄 SHORT_THRESHOLD |
-| r1_c7     | 100k       | 8     | 2.0       | 2048    | 50k         | 8192            | MIN_QUEUE 首次引入 |
+| r1_c7     | 100k       | 8     | 2.0       | 2048    | 50k         | 8192            | 引入MIN_QUEUE |
 | **r1_c8** | 50k        | 4     | 2.0       | 2048    | 100k        | 8192            | ALPHA_BASE 降低 + AMPLIFIER 提高 |
 
 实测指标（rate=inf）：
