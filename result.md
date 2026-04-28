@@ -35,22 +35,22 @@
 
 ## 迭代记录
 
-### Round 1 — 广泛探索（固定 ALPHA_BASE，变化 PRESSURE/CACHE/SHORT_BOOST）
+### Round 1 — 广泛探索（固定 ALPHA_BASE，变化 AMPLIFIER/CACHE_WEIGHT/SHORT_BOOST）
 
 所有配置均使用 ALPHA_BASE ≥ 50k 以保证稳定性。
 
 配置参数：
 
-| 配置      | ALPHA | MIN_Q | AMP | CACHE_W | BOOST | THRESH | 变化说明 |
-|-----------|-------|-------|-----|---------|-------|--------|---------|
-| r1_c1     | 100k  | 4     | 1.0 | 2048    | 0     | 8192   | 基准配置 |
-| r1_c2     | 100k  | 4     | 0.5 | 2048    | 0     | 8192   | AMP 降低 |
-| r1_c3     | 100k  | 4     | 1.0 | 10000   | 0     | 8192   | 高缓存权重 |
-| r1_c4     | 100k  | 4     | 4.0 | 2048    | 0     | 8192   | AMP 大幅提高 |
-| r1_c5     | 100k  | 4     | 1.0 | 2048    | 100k  | 8192   | 加 BOOST |
-| r1_c6     | 100k  | 4     | 1.0 | 2048    | 200k  | 4096   | 高 BOOST + 窄阈值 |
-| r1_c7     | 100k  | 8     | 2.0 | 2048    | 50k   | 8192   | MIN_QUEUE 首次引入 |
-| **r1_c8** | 50k   | 4     | 2.0 | 2048    | 100k  | 8192   | ALPHA 降低 + AMP 提高 |
+| 配置      | ALPHA_BASE | MIN_Q | AMPLIFIER | CACHE_W | SHORT_BOOST | SHORT_THRESHOLD | 变化说明 |
+|-----------|------------|-------|-----------|---------|-------------|-----------------|---------|
+| r1_c1     | 100k       | 4     | 1.0       | 2048    | 0           | 8192            | 基准配置 |
+| r1_c2     | 100k       | 4     | 0.5       | 2048    | 0           | 8192            | AMPLIFIER 降低 |
+| r1_c3     | 100k       | 4     | 1.0       | 10000   | 0           | 8192            | 高 CACHE_WEIGHT |
+| r1_c4     | 100k       | 4     | 4.0       | 2048    | 0           | 8192            | AMPLIFIER 大幅提高 |
+| r1_c5     | 100k       | 4     | 1.0       | 2048    | 100k        | 8192            | 加 SHORT_BOOST |
+| r1_c6     | 100k       | 4     | 1.0       | 2048    | 200k        | 4096            | 高 SHORT_BOOST + 窄 SHORT_THRESHOLD |
+| r1_c7     | 100k       | 8     | 2.0       | 2048    | 50k         | 8192            | MIN_QUEUE 首次引入 |
+| **r1_c8** | 50k        | 4     | 2.0       | 2048    | 100k        | 8192            | ALPHA_BASE 降低 + AMPLIFIER 提高 |
 
 实测指标（rate=inf）：
 
@@ -97,26 +97,26 @@
 **各配置观察**：
 
 - **c1（基准）**：rate=inf 均值TTFT 改善 14.8%，但 rate=4 p99_TTFT 暴增至 11.8s（FCFS 4.4s）——SRPT 尾部饥饿首次出现。
-- **c2（AMP 0.5↓）**：rate=inf 吞吐提升 7.1%（最佳），但 rate=4 p99 恶化至 14.9s。降低 AMP 减弱了对解码压力的感知，使排序更激进，加剧饥饿。
-- **c3（CACHE_WEIGHT 10000↑）**：三个速率均无改善，高缓存权重引入噪音、破坏 SRPT 顺序，反而有害。
-- **c4（AMP 4.0↑）**：rate=4 均值TTFT 降至 995ms（本轮最低），说明高 AMP 能加速清空队列；但 p99 仍达 11.9s，长请求仍被持续饥饿。
-- **c5（BOOST 100k，THRESH 8192）**：阈值 8192 覆盖全部 ShareGPT 请求，BOOST 对所有请求均生效，排序不变，结果与 c1 相近。
-- **c6（BOOST 200k，THRESH 4096↓）**：较窄阈值形成两档差异，但结果与 c5 几乎相同，说明此数据集短请求本就占多数，阈值不是关键变量。
+- **c2（AMPLIFIER 0.5↓）**：rate=inf 吞吐提升 7.1%（最佳），但 rate=4 p99 恶化至 14.9s。降低 AMPLIFIER 减弱了对解码压力的感知，使排序更激进，加剧饥饿。
+- **c3（CACHE_WEIGHT 10000↑）**：三个速率均无改善，高 CACHE_WEIGHT 引入噪音、破坏 SRPT 顺序，反而有害。
+- **c4（AMPLIFIER 4.0↑）**：rate=4 均值TTFT 降至 995ms（本轮最低），说明高 AMPLIFIER 能加速清空队列；但 p99 仍达 11.9s，长请求仍被持续饥饿。
+- **c5（SHORT_BOOST 100k，SHORT_THRESHOLD 8192）**：SHORT_THRESHOLD=8192 覆盖全部 ShareGPT 请求，SHORT_BOOST 对所有请求均生效，排序不变，结果与 c1 相近。
+- **c6（SHORT_BOOST 200k，SHORT_THRESHOLD 4096↓）**：较窄阈值形成两档差异，但结果与 c5 几乎相同，说明此数据集短请求本就占多数，SHORT_THRESHOLD 不是关键变量。
 - **c7（MIN_QUEUE 8↑）**：首次引入队列门控，rate=4 均值TTFT 降至 940ms。门控让 LARRY 在浅队列时回退至 FCFS，减轻但未消除尾部饥饿（p99 仍 12.7s，门控阈值仍太低）。
-- **c8（ALPHA 50k↓，AMP 2.0↑）**：本轮 rate=4 p99_TTFT 最低（10.3s）。较低 ALPHA 减缓老化速率，避免过于激进的 SRPT 排序；AMP=2.0 增强解码压力感知。rate=inf 均值TTFT 改善 19.9%。
+- **c8（ALPHA_BASE 50k↓，AMPLIFIER 2.0↑）**：本轮 rate=4 p99_TTFT 最低（10.3s）。较低 ALPHA_BASE 减缓老化速率，避免过于激进的 SRPT 排序；AMPLIFIER=2.0 增强解码压力感知。rate=inf 均值TTFT 改善 19.9%。
 
-**核心洞察**：所有配置在 rate=4 下 p99_TTFT 均大幅超出 FCFS（最优 c8 也超出 136%）。根因是中等负载下新短请求持续到达并抢占优先级，而 MIN_QUEUE≤8 无法阻止激活——说明 rate=4 下等待队列深度通常超过 8。SHORT_PREFILL_BOOST 因阈值过大而无效。
+**核心洞察**：所有配置在 rate=4 下 p99_TTFT 均大幅超出 FCFS（最优 c8 也超出 136%）。根因是中等负载下新短请求持续到达并抢占优先级，而 MIN_QUEUE≤8 无法阻止激活——说明 rate=4 下等待队列深度通常超过 8。SHORT_BOOST 因 SHORT_THRESHOLD 过大而无效。
 
-**Round 2 方向**：将 MIN_QUEUE 提高至 12–20，使 LARRY 仅在队列极深时激活；继续沿用低 ALPHA + 高 AMP 组合。
+**Round 2 方向**：将 MIN_QUEUE 提高至 12–20，使 LARRY 仅在队列极深时激活；继续沿用低 ALPHA_BASE + 高 AMPLIFIER 组合。
 
 ---
 
-### Round 2 — 收窄（ALPHA范围、选择性加速、MIN_QUEUE门控）
+### Round 2 — 收窄（ALPHA_BASE范围、选择性加速、MIN_QUEUE门控）
 
 配置参数：
 
-| 配置     | ALPHA | MIN_Q | AMP | BOOST | THRESH |
-|----------|-------|-------|-----|-------|--------|
+| 配置     | ALPHA_BASE | MIN_Q | AMPLIFIER | SHORT_BOOST | SHORT_THRESHOLD |
+|----------|------------|-------|-----------|-------------|-----------------|
 | r2_c1    | 30k   | 4     | 3.0 | 100k  | 8192   |
 | r2_c2    | 20k   | 4     | 4.0 | 100k  | 8192   |
 | r2_c3    | 50k   | 4     | 2.0 | 200k  | 2048   |
@@ -166,16 +166,16 @@
 
 **关键发现**：MIN_QUEUE=20 是突破口。rate=4 的 p99_TTFT 从 10.3s（r1_c8）降至 6.8s（r2_c7），说明 rate=4 下队列深度通常 ≤20，LARRY 很少激活，饥饿问题得到抑制。
 
-**Round 3 假设**：组合高 ALPHA（→ rate=inf 的 SRPT 收益更大）+ MIN_QUEUE ≥ 20（→ 保护 rate=4）。
+**Round 3 假设**：组合高 ALPHA_BASE（→ rate=inf 的 SRPT 收益更大）+ MIN_QUEUE ≥ 20（→ 保护 rate=4）。
 
 ---
 
-### Round 3 — 收敛（ALPHA × MIN_QUEUE 网格搜索）
+### Round 3 — 收敛（ALPHA_BASE × MIN_QUEUE 网格搜索）
 
 配置参数：
 
-| 配置      | ALPHA  | MIN_Q | AMP | BOOST |
-|-----------|--------|-------|-----|-------|
+| 配置      | ALPHA_BASE | MIN_Q | AMPLIFIER | SHORT_BOOST |
+|-----------|------------|-------|-----------|-------------|
 | r3_c1     | 100k   | 20    | 1.0 | 100k  |
 | r3_c2     | 100k   | 20    | 2.0 | 100k  |
 | r3_c3     | 50k    | 25    | 2.0 | 100k  |
@@ -219,26 +219,26 @@
 | r3_c6     | 276.07  | 124         | 219         | 33.21       | 38.87       | 1.855      |
 | FCFS基线  | 275.86  | 124         | 228         | 33.53       | 41.73       | 1.860      |
 
-**关键发现**：r3_c5 `{ALPHA=100000, MIN_QUEUE=25, AMP=1.0}` 为当前最优配置（TOTAL=+3.34）。MIN_QUEUE=25 使 LARRY 在 rate=4 下几乎不激活（队列通常 ≤25），消除尾部饥饿；ALPHA=100k 在 rate=inf 保证强力 SRPT 效果。
+**关键发现**：r3_c5 `{ALPHA_BASE=100000, MIN_QUEUE=25, AMPLIFIER=1.0}` 为当前最优配置（TOTAL=+3.34）。MIN_QUEUE=25 使 LARRY 在 rate=4 下几乎不激活（队列通常 ≤25），消除尾部饥饿；ALPHA_BASE=100k 在 rate=inf 保证强力 SRPT 效果。
 
-**Round 4 目标**：围绕 r3_c5 微调，测试 ALPHA 80k-150k、MIN_QUEUE 22-30、AMP 0.5-1.5。
+**Round 4 目标**：围绕 r3_c5 微调，测试 ALPHA_BASE 80k-150k、MIN_QUEUE 22-30、AMPLIFIER 0.5-1.5。
 
 *注：TOTAL 得分为 {inf, 4, 2} 三个速率的平均值（rate=1 不常用，已排除）。*
 
 ---
 
-### Round 4 — 微调（ALPHA × MIN_QUEUE × AMP 精细搜索）
+### Round 4 — 微调（ALPHA_BASE × MIN_QUEUE × AMPLIFIER 精细搜索）
 
 配置参数：
 
-| 配置      | ALPHA  | MIN_Q | AMP | 变化说明 |
-|-----------|--------|-------|-----|---------|
-| r4_c1     | 100k   | 28    | 1.0 | MIN_Q 上调 |
-| r4_c2     | 100k   | 22    | 1.0 | MIN_Q 下调 |
-| r4_c3     | 120k   | 25    | 1.0 | ALPHA 上调 |
-| r4_c4     | 100k   | 25    | 0.5 | AMP 下调 |
-| r4_c5     | 100k   | 25    | 1.5 | AMP 上调 |
-| r4_c6     | 150k   | 25    | 1.0 | ALPHA 大幅上调 |
+| 配置      | ALPHA_BASE | MIN_Q | AMPLIFIER | 变化说明 |
+|-----------|------------|-------|-----------|---------|
+| r4_c1     | 100k       | 28    | 1.0       | MIN_Q 上调 |
+| r4_c2     | 100k       | 22    | 1.0       | MIN_Q 下调 |
+| r4_c3     | 120k       | 25    | 1.0       | ALPHA_BASE 上调 |
+| r4_c4     | 100k       | 25    | 0.5       | AMPLIFIER 下调 |
+| r4_c5     | 100k       | 25    | 1.5       | AMPLIFIER 上调 |
+| r4_c6     | 150k       | 25    | 1.0       | ALPHA_BASE 大幅上调 |
 
 实测指标（rate=inf）：
 
@@ -266,7 +266,7 @@
 
 *注：r4_c1 在暂停前已完成测试。r4_c2–c6 尚未运行。*
 
-**初步观察**：r4_c1（MIN_QUEUE=28）的 rate=4 p99_TTFT=4848ms 低于 r3_c5 的 5026ms（约 +3.5% 改善），rate=inf 均值TTFT 也略有改善（43357 vs 44339ms）。MIN_QUEUE 进一步上调有积极效果。
+**初步观察**：r4_c1（MIN_QUEUE=28）的 rate=4 p99_TTFT=4848ms 低于 r3_c5 的 5026ms（约 +3.5% 改善），rate=inf 均值TTFT 也略有改善（43357 vs 44339ms）。MIN_QUEUE 进一步上调有积极效果。ALPHA_BASE 和 AMPLIFIER 维持 r3_c5 最优值不变。
 
 ---
 
