@@ -103,7 +103,7 @@
 - **c7（MIN_QUEUE 8↑）**：首次引入队列门控，rate=4 均值TTFT 降至 940ms。门控让 LARRY 在浅队列时回退至 FCFS，减轻但未消除饥饿（p99 仍 12.7s，门控阈值仍太低）。
 - **c8（ALPHA_BASE 50k↓，AMPLIFIER 2.0↑）**：本轮 rate=4 p99_TTFT 最低（10.3s）。较低 ALPHA_BASE 减缓老化速率，避免过于激进的 SRPT 排序；AMPLIFIER=2.0 增强解码压力感知。rate=inf 均值TTFT 改善 19.9%。
 
-**观察**：所有配置在 rate=4 下 p99_TTFT 均大幅超出 FCFS（最优 c8 也超出 136%）。根因是中等负载下新短请求持续到达并抢占优先级，而 MIN_QUEUE≤8 基本不触发，说明 rate=4 下等待队列长度通常超过 8。SHORT_BOOST 因 SHORT_THRESHOLD 过大而无效。
+**观察**：所有配置在 rate=4 下 p99_TTFT 均大幅超出 FCFS（最优 c8 也超出 136%）。猜测原因是中等负载下新短请求持续到达并抢占优先级 (MIN_QUEUE≤8 基本不触发，说明 rate=4 下等待队列长度通常超过 8)。SHORT_BOOST 因 SHORT_THRESHOLD 过大而无效。
 
 **Round 2 方向**：将 MIN_QUEUE 提高至 12–20，使 LARRY 仅在队列极深时激活；继续沿用低 ALPHA_BASE + 高 AMPLIFIER 组合。
 
