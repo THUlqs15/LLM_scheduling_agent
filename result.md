@@ -9,7 +9,7 @@
 - 负载：512条 ShareGPT 请求；速率 {inf, 4, 2} req/s
 
 ## 代码改动
-- 修改的 vLLM 文件：vllm/v1/core/sched/scheduler.py（新增 import 及 `_larry_reorder_waiting` 方法）
+- 修改的 vLLM 文件：vllm/v1/core/sched/scheduler.py（主要新增 `_larry_reorder_waiting` 方法）
 - 新增文件：vllm/v1/core/sched/larry_hook.py
 - 不设置 VLLM_USE_LARRY 时, i.e., `LarryRuntime.get().enabled == False`，vllm 正常导入，零额外开销
 
