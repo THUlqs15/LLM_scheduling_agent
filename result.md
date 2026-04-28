@@ -11,7 +11,7 @@
 ## 代码改动
 - 修改的 vLLM 文件：vllm/v1/core/sched/scheduler.py（新增 import 及 `_larry_reorder_waiting` 方法）
 - 新增文件：vllm/v1/core/sched/larry_hook.py
-- 不设置 VLLM_USE_LARRY 时：已验证 `LarryRuntime.get().enabled == False`，vllm 正常导入，零额外开销
+- 不设置 VLLM_USE_LARRY 时, i.e., `LarryRuntime.get().enabled == False`，vllm 正常导入，零额外开销
 
 ## FCFS 基线（参考值）
 | 速率 | 耗时(s) | 均值TTFT(ms) | p99_TTFT(ms) | 均值TPOT(ms) | p99_TPOT(ms) | 吞吐(req/s) |
