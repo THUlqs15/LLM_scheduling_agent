@@ -167,7 +167,7 @@ class Alt1HeuristicSolver:
     # slack is already < −ln(CAP) all share the same maximum "urgency boost"
     # for the priority order; the objective in Step 3 still uses the
     # uncapped exp.  EXP_CAP = 5 ⇒ s_n < −ln(5) ≈ −1.609 s saturates.
-    EXP_CAP: float = 5.0
+    EXP_CAP: float = 10.0
 
     def __init__(
         self,
