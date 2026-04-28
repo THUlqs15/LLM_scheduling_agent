@@ -217,7 +217,7 @@
 | r3_c6     | 276.07  | 124         | 219         | 33.21       | 38.87       | 1.855      |
 | FCFS基线  | 275.86  | 124         | 228         | 33.53       | 41.73       | 1.860      |
 
-**发现**：r3_c5 `{ALPHA_BASE=100000, MIN_QUEUE=25, AMPLIFIER=1.0}` 为当前最优配置。MIN_QUEUE=25 使 LARRY 在 rate=4 下几乎不激活（队列通常 ≤25）；ALPHA_BASE=100k 在 rate=inf 保证强力 SRPT 效果。
+**发现**：r3_c5 为当前最优配置。
 
 **Round 4 方向**：围绕 r3_c5 微调，测试 ALPHA_BASE 80k-150k、MIN_QUEUE 22-30、AMPLIFIER 0.5-1.5。
 
